@@ -1,3 +1,1 @@
-# create a minimal Next.js app (JavaScript)
-npx create-next-app@latest attom-proxy --ts=false --eslint --app=false --src-dir=false --import-alias "@/*"
-cd attom-proxy
+
