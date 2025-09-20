@@ -12,6 +12,9 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
+  const API_KEY = process.env.ATTOM_API_KEY;
+  if (!API_KEY) return res.status(500).json({ error: 'Missing ATTOM_API_KEY at runtime' });
+
   try {
     const { address1, address2 } = req.body || {};
     if (!address1 || !address2) return res.status(400).json({ error: 'Missing address' });
@@ -21,7 +24,8 @@ export default async function handler(req, res) {
     url.searchParams.set('address2', address2);
 
     const r = await fetch(url, {
-      headers: { apikey: process.env.ATTOM_API_KEY, accept: 'application/json' }
+      method: 'GET',
+      headers: { apikey: API_KEY, accept: 'application/json' }
     });
 
     const text = await r.text();
@@ -35,7 +39,7 @@ export default async function handler(req, res) {
     const lotAcres = p?.lot?.lotSizeAcres;
     const lotSqft = p?.lot?.lotsize1 ?? (lotAcres ? Math.round(lotAcres * 43560) : null);
 
-    const out = {
+    return res.status(200).json({
       address: p?.address?.oneLine ?? null,
       yearBuilt: p?.summary?.yearBuilt ?? null,
       beds: p?.building?.rooms?.beds ?? null,
@@ -47,9 +51,7 @@ export default async function handler(req, res) {
       lastSalePrice: p?.salehistory?.[0]?.amount?.saleAmt ?? p?.sale?.amount?.saleAmt ?? null,
       propertyType: p?.summary?.propclass ?? p?.building?.summary?.propType ?? null,
       unitNumber: p?.address?.unit ?? null
-    };
-
-    return res.status(200).json(out);
+    });
   } catch (e) {
     return res.status(500).json({ error: 'Proxy crashed', details: String(e) });
   }
