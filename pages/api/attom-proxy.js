@@ -16,7 +16,7 @@ export default async function handler(req, res) {
     const { address1, address2 } = req.body || {};
     if (!address1 || !address2) return res.status(400).json({ error: 'Missing address' });
 
-    const url = new URL('https://api.attomdata.com/propertyapi/v1.0.0/property/detail');
+    const url = new URL('https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail');
     url.searchParams.set('address1', address1);
     url.searchParams.set('address2', address2);
 
