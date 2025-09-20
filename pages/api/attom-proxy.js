@@ -1,9 +1,9 @@
 // pages/api/attom-proxy.js
 export default async function handler(req, res) {
-  // CORS — add your real Framer/custom domains here
+  // CORS — your live Framer site
   const allowed = [
-    'https://YOUR-FRAMER-SITE.framer.website',
-    'https://YOURCUSTOMDOMAIN.com',
+    'https://numerical-people-374905.framer.app',
+    // add more allowed origins here if needed
     'http://localhost:3000'
   ];
   const origin = req.headers.origin || '';
@@ -23,12 +23,10 @@ export default async function handler(req, res) {
     const { address1, address2 } = req.body || {};
     if (!address1 || !address2) return res.status(400).json({ error: 'Missing address' });
 
-    // ATTOM uses the gateway host
     const url = new URL('https://api.gateway.attomdata.com/propertyapi/v1.0.0/property/detail');
     url.searchParams.set('address1', address1);
     url.searchParams.set('address2', address2);
 
-    // 🔑 Call ATTOM with GET (required), passing the API key header
     const r = await fetch(url.toString(), {
       method: 'GET',
       headers: {
@@ -39,14 +37,21 @@ export default async function handler(req, res) {
 
     const text = await r.text();
     if (!r.ok) {
-      // Bubble up ATTOM’s error payload to help debugging
-      return res.status(r.status).json({ error: 'ATTOM error', details: text });
+      // Try to parse ATTOM error for clarity
+      try {
+        const err = JSON.parse(text);
+        const status = err?.Response?.status || err?.status;
+        return res
+          .status(r.status)
+          .json({ error: 'ATTOM error', attomStatus: status, details: text });
+      } catch {
+        return res.status(r.status).json({ error: 'ATTOM error', details: text });
+      }
     }
 
     const data = JSON.parse(text);
     const p = (data.property && data.property[0]) || {};
 
-    // Normalize fields
     const bathsFull = Number(p?.building?.rooms?.bathsFull ?? 0);
     const bathsHalf = Number(p?.building?.rooms?.bathsHalf ?? 0);
     const lotAcres = p?.lot?.lotSizeAcres;
