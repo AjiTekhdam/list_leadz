@@ -1,14 +1,14 @@
 // pages/api/realie-proxy.js
 
 const REALIE_BASE = "https://app.realie.ai/api/public/property/search"; // no trailing slash
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*"; // set to your Framer domain in prod
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 
 export default async function handler(req, res) {
   // CORS
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,x-api-key");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method Not Allowed" });
 
@@ -32,20 +32,37 @@ export default async function handler(req, res) {
 
   const upstream = `${REALIE_BASE}?${qs.toString()}`;
 
-  // Realie usually wants: Authorization: Bearer <KEY>
-  const key = process.env.REALIE_API_KEY || "";
-  const headers = {
-    Accept: "application/json",
-    ...(key ? { Authorization: key.startsWith("Bearer ") ? key : `Bearer ${key}` } : {}),
-  };
+  const rawKey = process.env.REALIE_API_KEY || "";
+  if (!rawKey) {
+    return res.status(500).json({ error: "REALIE_API_KEY is not set in Vercel env" });
+  }
+
+  // Try both common auth styles
+  const headersList = [
+    {
+      Accept: "application/json",
+      Authorization: rawKey.startsWith("Bearer ") ? rawKey : `Bearer ${rawKey}`,
+    },
+    {
+      Accept: "application/json",
+      "x-api-key": rawKey, // some backends use this
+    },
+  ];
 
   try {
-    const r = await fetch(upstream, { headers, cache: "no-store" });
-    const text = await r.text(); // pass through exact body
+    // attempt Authorization first, then x-api-key
+    let r, lastText;
+    for (const headers of headersList) {
+      r = await fetch(upstream, { headers, cache: "no-store" });
+      lastText = await r.text();
+      if (r.ok || r.status !== 401) break; // stop if success or error not auth-related
+    }
+
+    // return exactly what Realie returned
     res
       .status(r.status)
       .setHeader("Content-Type", r.headers.get("content-type") || "application/json")
-      .send(text);
+      .send(lastText);
   } catch (e) {
     res.status(500).json({ error: e?.message || "proxy error" });
   }
