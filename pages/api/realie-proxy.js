@@ -1,7 +1,9 @@
 // pages/api/realie-proxy.js
 
-const SEARCH_BASE = "https://app.realie.ai/api/public/property/search"; // JSON
-const LOOKUP_BASE = "https://app.realie.ai/lookup";                      // path-style
+// Realie endpoints
+const ADDRESS_BASE = "https://app.realie.ai/api/public/property/address"; // exact address match
+const LOOKUP_BASE  = "https://app.realie.ai/lookup";                      // path-style + lat/lng
+const SEARCH_BASE  = "https://app.realie.ai/api/public/property/search";  // general search
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
 
@@ -20,9 +22,14 @@ export default async function handler(req, res) {
     return res.status(200).json({
       hasKey: !!raw,
       keyLength: raw.length,
-      triedStyles: ["Authorization: Bearer <key>", "Authorization: <key>", "x-api-key", "X-API-Key"],
-      baseSearch: SEARCH_BASE,
-      baseLookup: LOOKUP_BASE,
+      order: ["address", "lookup", "search"],
+      bases: { ADDRESS_BASE, LOOKUP_BASE, SEARCH_BASE },
+      triedStyles: [
+        "Authorization: Bearer <key>",
+        "Authorization: <key>",
+        "x-api-key",
+        "X-API-Key",
+      ],
     });
   }
 
@@ -34,6 +41,7 @@ export default async function handler(req, res) {
 
   if (!state) return res.status(400).json({ error: "`state` is required" });
 
+  // auth styles — Realie sometimes accepts raw key or x-api-key
   const rawKey = process.env.REALIE_API_KEY || "";
   if (!rawKey) return res.status(500).json({ error: "REALIE_API_KEY not set" });
 
@@ -44,9 +52,8 @@ export default async function handler(req, res) {
     { style: "X-API-Key",   headers: { Accept: "application/json", "X-API-Key": rawKey } },
   ];
 
-  // Helper that tries all header styles in order
-  const upstreamFetch = async (url) => {
-    let used = "none", resp, body;
+  const tryUpstream = async (url) => {
+    let resp, body, used = "none";
     for (const v of headerVariants) {
       resp = await fetch(url, { headers: v.headers, cache: "no-store" });
       body = await resp.text();
@@ -56,23 +63,72 @@ export default async function handler(req, res) {
     return { resp, body, used };
   };
 
+  // Normalize to the pass-through shape your client expects
+  const wrapOne = (obj) => JSON.stringify({
+    properties: obj ? [obj] : [],
+    metadata: { limit: 1, offset: 0, count: obj ? 1 : 0 },
+  });
+
   try {
-    // ===== 1) LOOKUP (path-style) if we have lat/lng + city + address =====
-    if (latitude && longitude && city && address) {
-      const url = `${LOOKUP_BASE}/${encodeURIComponent(String(state).toUpperCase())}` +
-                  `/${encodeURIComponent(String(city).toUpperCase())}` +
-                  `/${encodeURIComponent(address)}?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`;
-      const { resp, body, used } = await upstreamFetch(url);
+    // -----------------------------
+    // 1) ADDRESS endpoint (best for exact street matches)
+    // -----------------------------
+    if (address) {
+      const qsA = new URLSearchParams();
+      qsA.set("state", String(state).toUpperCase());
+      // Realie /address works fine with just state + address; we’ll pass optional extras too
+      qsA.set("address", address);
+      if (city)   qsA.set("city", String(city).toUpperCase());
+      if (zipCode) qsA.set("zipCode", zipCode);
+      if (unitNumberStripped) qsA.set("unitNumberStripped", unitNumberStripped);
+      qsA.set("limit", String(limit));
+      qsA.set("offset", String(offset));
+      qsA.set("residential", String(residential));
+
+      const urlA = `${ADDRESS_BASE}/?${qsA.toString()}`;
+      const { resp, body, used } = await tryUpstream(urlA);
 
       if (resp.ok) {
-        // Realie lookup returns a single property object → wrap to match search shape
+        // /address returns a single property object
+        let obj = null;
+        try { obj = JSON.parse(body); } catch {}
         res.setHeader("x-auth-style", used);
         return res
           .status(200)
           .setHeader("Content-Type", "application/json")
-          .send(JSON.stringify({ properties: body ? [JSON.parse(body)] : [], metadata: { limit: 1, offset: 0, count: body ? 1 : 0 } }));
+          .send(wrapOne(obj));
       }
+      if (resp.status !== 404) {
+        // error other than "not found" — bubble it
+        res.setHeader("x-auth-style", used);
+        return res
+          .status(resp.status)
+          .setHeader("Content-Type", resp.headers.get("content-type") || "application/json")
+          .send(body);
+      }
+      // 404 → fall through
+    }
 
+    // -----------------------------
+    // 2) LOOKUP endpoint (needs state/city/address + lat/lng)
+    // -----------------------------
+    if (latitude && longitude && city && address) {
+      const urlL =
+        `${LOOKUP_BASE}/${encodeURIComponent(String(state).toUpperCase())}` +
+        `/${encodeURIComponent(String(city).toUpperCase())}` +
+        `/${encodeURIComponent(address)}?latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`;
+
+      const { resp, body, used } = await tryUpstream(urlL);
+
+      if (resp.ok) {
+        let obj = null;
+        try { obj = JSON.parse(body); } catch {}
+        res.setHeader("x-auth-style", used);
+        return res
+          .status(200)
+          .setHeader("Content-Type", "application/json")
+          .send(wrapOne(obj));
+      }
       if (resp.status !== 404) {
         res.setHeader("x-auth-style", used);
         return res
@@ -80,25 +136,27 @@ export default async function handler(req, res) {
           .setHeader("Content-Type", resp.headers.get("content-type") || "application/json")
           .send(body);
       }
-      // if 404 → fall through to search
+      // 404 → fall through
     }
 
-    // ===== 2) SEARCH (query-style) =====
-    const qs = new URLSearchParams();
-    qs.set("state", String(state).toUpperCase());
-    if (city)   qs.set("city",   String(city).toUpperCase());
-    if (county) qs.set("county", county);
-    if (zipCode) qs.set("zipCode", zipCode);
-    if (address) qs.set("address", address);
-    if (unitNumberStripped) qs.set("unitNumberStripped", unitNumberStripped);
-    qs.set("limit", String(limit));
-    qs.set("offset", String(offset));
-    qs.set("residential", String(residential));
+    // -----------------------------
+    // 3) SEARCH endpoint (broad fallback)
+    // -----------------------------
+    const qsS = new URLSearchParams();
+    qsS.set("state", String(state).toUpperCase());
+    if (city)   qsS.set("city", String(city).toUpperCase());
+    if (county) qsS.set("county", county);
+    if (zipCode) qsS.set("zipCode", zipCode);
+    if (address) qsS.set("address", address);
+    if (unitNumberStripped) qsS.set("unitNumberStripped", unitNumberStripped);
+    qsS.set("limit", String(limit));
+    qsS.set("offset", String(offset));
+    qsS.set("residential", String(residential));
 
-    const searchUrl = `${SEARCH_BASE}?${qs.toString()}`;
-    const { resp, body, used } = await upstreamFetch(searchUrl);
+    const urlS = `${SEARCH_BASE}?${qsS.toString()}`;
+    const { resp, body, used } = await tryUpstream(urlS);
 
-    // Convert Realie 404 "no results" into empty list (easier for client)
+    // Realie sometimes uses 404 to mean "no matches" — normalize to empty list
     if (resp.status === 404) {
       res.setHeader("x-auth-style", used);
       return res
@@ -112,6 +170,7 @@ export default async function handler(req, res) {
       .status(resp.status)
       .setHeader("Content-Type", resp.headers.get("content-type") || "application/json")
       .send(body);
+
   } catch (e) {
     return res.status(500).json({ error: e?.message || "proxy error" });
   }
